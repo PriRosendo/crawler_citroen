@@ -1,0 +1,24 @@
+name: Crawler Citroen
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # toda segunda-feira às 04:10 UTC
+  workflow_dispatch:  # permite rodar manualmente
+
+jobs:
+  run_crawler:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run crawler
+        run: python parsers/crowler_runner.py
