@@ -1,24 +1,94 @@
-name: Crawler Citroen
+# .github/workflows/scrape.yml
+
+name: Executar Scraper da Citroen
 
 on:
-  schedule:
-    - cron: '0 4 * * 1'  # toda segunda-feira às 04:10 UTC
-  workflow_dispatch:  # permite rodar manualmente
+  # Permite que você rode o script manualmente pela interface do GitHub
+  workflow_dispatch:
+
+  # Opcional: Agenda a execução (Ex: todo dia às 3:00 da manhã UTC)
+  # schedule:
+  #   - cron: '0 3 * * *'
+
+# Permissões necessárias para configurar o SSH
+permissions:
+  contents: read
 
 jobs:
-  run_crawler:
+  scrape:
+    # Usar a versão mais recente do Ubuntu Linux
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      # 1. Baixa o código do seu repositório (o Crawler.py e requirements.txt)
+      - name: 1. Baixar o código (Checkout)
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      # 2. Configura o ambiente Python
+      - name: 2. Configurar Python 3.10
+        uses: actions/setup-python@v5
         with:
-          python-version: 3.11
+          python-version: '3.10'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      # 3. Instala o Google Chrome e o ChromeDriver
+      - name: 3. Instalar Chrome e ChromeDriver
+        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
 
-      - name: Run crawler
-        run: python parsers/crowler_runner.py
+      # 4. Instala as dependências do Python (o 'selenium')
+      - name: 4. Instalar dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # --- INÍCIO DA ALTERAÇÃO ---
+      # 5. Executa o seu script Python (Crawler.py)
+      - name: 5. Executar o Crawler
+        run: python Crawler.py
+      # --- FIM DA ALTERAÇÃO ---
+
+      # 6. Configura a chave SSH para o push
+      - name: 6. Configurar Chave SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          # Carrega a chave privada que você salvou nos Secrets (REPO_B_DEPLOY_KEY)
+          ssh-private-key: ${{ secrets.REPO_B_DEPLOY_KEY }}
+
+      # 7. Configura o Git
+      - name: 7. Configurar Git
+        run: |
+          git config --global user.name "GitHub Action Scraper"
+          git config --global user.email "action@github.com"
+          
+      # 8. Clona o Repo B, move o arquivo, e faz o Push
+      - name: 8. Fazer Push dos dados para o Repositório B (Analyzer)
+        run: |
+          # --- URL SSH DO SEU REPOSITÓRIO B ---
+          REPO_B_URL="git@github.com:PriRosendo/analyzer_pdf.git" 
+          
+          echo "Clonando Repo B..."
+          git clone $REPO_B_URL repo_b
+          
+          echo "Movendo dados para o Repo B..."
+          mv citroen_data.json repo_b/citroen_data.json
+          
+          cd repo_b
+          
+          # Verifica se há mudanças. Se não houver, sai sem erro.
+          if [[ -z $(git status -s) ]]; then
+            echo "Nenhum dado novo para enviar."
+            exit 0
+          fi
+          
+          echo "Enviando dados para o Repo B..."
+          git add citroen_data.json
+          git commit -m "Atualização automática dos dados da Citroen"
+          git push
+
+      # 9. Salva o resultado como artefato (Opcional, mas bom para debug)
+      - name: 9. Salvar o resultado (Artefato)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dados-citroen
+          path: citroen_data.json
+          if-no-files-found: ignore
