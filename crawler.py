@@ -1,4 +1,4 @@
-# scraper.py
+# Crawler.py
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -9,10 +9,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 import json
 import time
-import re # Importa o módulo de expressões regulares
-from urllib.parse import urljoin # Para garantir URLs absolutas
+import re 
+import os 
+from supabase import create_client, Client 
+from urllib.parse import urljoin
 
-# --- INÍCIO DAS LISTAS DE CLASSIFICAÇÃO ---
+# --- LISTAS DE CLASSIFICAÇÃO (Mantidas) ---
 TURBO_KEYWORDS_RAW = [
     'T', 'TC', 'TCI', 'TFSI', 'TSI', 'TGI', 'TGDI', 'GDI-T', 'T-GDI', 'GTDi', 'EcoBoost', 
     'TwinPower Turbo', 'TurboJet / MultiAir Turbo', 'THP', 'HDi', 'BlueHDi', 'CDTi', 'dCi', 
@@ -37,11 +39,30 @@ FUEL_REGEX_LIST = [
     {"tipo": "Etanol/Álcool", "regex": r"\b(et[aá]nol|[aá]lcool|ethanol)\b"},
     {"tipo": "Hidrogênio", "regex": r"\b(hidrog[eê]nio|hydrogen|fuel\s*cell|fcev)\b"}
 ]
-# --- FIM DAS LISTAS DE CLASSIFICAÇÃO ---
+# --- FIM DAS LISTAS ---
 
-# --- INÍCIO DAS FUNÇÕES AUXILIARES ---
+# --- MAPA DE FALLBACK DE MANUAIS (Mantido) ---
+MANUAL_FALLBACK_MAP = {
+    # Modelo C3
+    ('C3', 'c3 you! t200'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-T%C3%A9cnica-C3-You-CY25-PL8.pdf",
+    ('C3', 'c3 feel'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-T%C3%A9cnica-C3-Feel-CY25-PL8.pdf",
+    ('C3', 'c3 live pack'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-T%C3%A9cnica-C3-Live-Pack-CY25-PL8.pdf",
+    ('C3', 'c3 live'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-T%C3%A9cnica-C3-Live-CY25-PL8.pdf",
+
+    # Modelo Aircross
+    ('Aircross', 'shine'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-Tecnica-Aircross-Shine-CY25-PL8.pdf",
+    ('Aircross', 'feel pack'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-Tecnica-Aircross-Feel-Pack-CY25-PL8.pdf", # "Feel 7"
+    ('Aircross', 'feel'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-Tecnica-Aircross-Feel-CY25-PL8.pdf", # "Feel 5"
+
+    # Modelo Basalt
+    ('Basalt', 'shine turbo'): "https://www.citroen.com.br/content/dam/citroen/paginas/showrooms/basalt/ficha-tecnica/Ficha-T%C3%A9cnica-Basalt-Shine-Turbo-AT-CY25.pdf",
+    ('Basalt', 'feel turbo'): "https://www.citroen.com.br/content/dam/citroen/paginas/showrooms/basalt/ficha-tecnica/Ficha-T%C3%A9cnica-Basalt-Feel-Turbo-AT-CY25.pdf",
+    ('Basalt', 'feel'): "https://www.citroen.com.br/content/dam/citroen/products/ficha-t%C3%A9cnica/Ficha-T%C3%A9cnica-Basalt-Feel-MT-CY25-1.pdf",
+}
+# --- FIM DO MAPA ---
+
+# --- FUNÇÕES AUXILIARES (Mantidas) ---
 def get_motor_value(motor_string):
-    """Extrai o valor do motor (ex: 1.0, 1.6, 100 kW~136 cv)"""
     if not motor_string: return None
     try:
         match_displacement = re.search(r"\b(\d\.\d+)\b", motor_string) 
@@ -57,15 +78,11 @@ def get_motor_value(motor_string):
     return None
 
 def get_turbo_value(motor_string):
-    """Verifica se a string do motor contém uma palavra-chave turbo"""
     if not motor_string: return None
     try:
         motor_string_upper = motor_string.upper()
-        # Remove palavras que podem conter 'T' (ex: AUTOMATICO)
         motor_part_only = motor_string_upper.split("CÂMBIO")[0].split("AUTOMÁTICO")[0].split("MANUAL")[0]
-        
         for term in TURBO_KEYWORDS_SORTED:
-            # Usa regex com \b (word boundary) para encontrar o termo exato
             if re.search(r'\b' + re.escape(term) + r'\b', motor_part_only):
                 return "Sim"
     except Exception:
@@ -73,7 +90,6 @@ def get_turbo_value(motor_string):
     return None
 
 def get_fuel_value(motor_string):
-    """Extrai o tipo de combustível da string do motor"""
     if not motor_string: return None
     try:
         for fuel in FUEL_REGEX_LIST:
@@ -82,26 +98,38 @@ def get_fuel_value(motor_string):
     except Exception:
         pass
     return None
-# --- FIM DAS FUNÇÕES AUXILIARES ---
+# --- FIM DAS FUNÇÕES ---
+
+# --- CONEXÃO SUPABASE (Mantida) ---
+try:
+    url: str = os.environ.get("SUPABASE_URL")
+    key: str = os.environ.get("SUPABASE_KEY")
+    
+    if not url or not key:
+        supabase = None
+        print("⚠️ AVISO: SUPABASE_URL ou SUPABASE_KEY não definidos. A verificação de duplicatas está DESATIVADA.")
+    else:
+        supabase: Client = create_client(url, key)
+        print("✔️ Conectado ao Supabase com sucesso.")
+except Exception as e:
+    print(f"❌ ERRO: Falha ao inicializar o Supabase: {e}")
+    supabase = None
+# --- FIM DA CONEXÃO ---
 
 
 # --- CONFIG DO NAVEGADOR (MODO NUVEM) ---
 chrome_options = Options()
-chrome_options.add_argument("--headless=new")  # Obrigatório para rodar na nuvem
-chrome_options.add_argument("--no-sandbox") # Obrigatório para rodar como root no Linux
-chrome_options.add_argument("--disable-dev-shm-usage") # Obrigatório para evitar falhas de memória
-chrome_options.add_argument("--window-size=1920,1080") # Define um tamanho de janela
+chrome_options.add_argument("--headless=new")  
+chrome_options.add_argument("--no-sandbox") 
+chrome_options.add_argument("--disable-dev-shm-usage") 
+chrome_options.add_argument("--window-size=1920,1080") 
 chrome_options.add_argument("--start-maximized")
 
-# O Service() vazio assume que o chromedriver está no PATH (o workflow do Passo 3 vai cuidar disso)
 driver = webdriver.Chrome(service=Service(), options=chrome_options)
 # --- FIM DA CONFIG ---
 
-
-# Wait principal (para carregar a página)
 wait = WebDriverWait(driver, 30)
-# Wait curto para elementos internos
-wait_short = WebDriverWait(driver, 10) # Aumentado para 10s para ser mais seguro
+wait_short = WebDriverWait(driver, 10) 
 
 driver.get("https://www.citroen.com.br/")
 
@@ -119,11 +147,11 @@ try:
     menu_button = wait.until(
         EC.element_to_be_clickable((By.CSS_SELECTOR, 'li[title="Menu"] .menu-hamburger__cta'))
     )
-    menu_button.click() # Usa o clique normal
+    menu_button.click() 
 
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.menu-hamburger__options")))
     print("✔️ Menu principal aberto.")
-    time.sleep(2.5) # Mantendo o sleep aumentado
+    time.sleep(2.5) 
 
 except Exception as e:
     print(f"Erro ao abrir menu principal: {e}")
@@ -144,7 +172,7 @@ try:
     print("✔️ Clicou em '+' de Carros.")
 
     wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "li.menu-hamburger__options__category")))
-    time.sleep(2.5) # Mantendo o sleep aumentado
+    time.sleep(2.5) 
 
 except Exception as e:
     print(f"Erro ao expandir 'Carros': {e}")
@@ -165,14 +193,16 @@ for cat in categories:
         links = cat.find_elements(By.CSS_SELECTOR, "li.menu-hamburger__options__sub-item a")
         for link in links:
             try:
-                modelo = link.get_attribute('textContent').strip()
+                modelo_menu = link.get_attribute('textContent').strip()
                 url = link.get_attribute("href")
-                if not url: print(f"      ⚠️ Link com texto '{modelo}' tem URL vazia. Pulando."); continue
+                if not url: print(f"      ⚠️ Link com texto '{modelo_menu}' tem URL vazia. Pulando."); continue
                 if "veiculos-passeio" in url or "veiculos-utilitarios" in url:
-                    if modelo: result[modelo] = {"tipo_modelo": tipo, "site_url": url}; print(f"      ✔️ Modelo encontrado: {modelo} ({tipo})")
+                    if modelo_menu: 
+                        result[modelo_menu] = {"tipo_modelo": tipo, "site_url": url}
+                        print(f"      ✔️ Modelo encontrado: {modelo_menu} ({tipo})")
                     else: print(f"      ⚠️ Modelo com nome vazio ignorado (textContent). URL: {url}")
                 else:
-                    if modelo: print(f"      Ignorando link não-veículo: {modelo} ({url})")
+                    if modelo_menu: print(f"      Ignorando link não-veículo: {modelo_menu} ({url})")
                     else: print(f"      Ignorando link não-veículo sem nome. URL: {url}")
             except StaleElementReferenceException: print("      ⚠️ Stale Element ao processar um link. Tentando continuar..."); continue
             except Exception as e_link: print(f"      ❌ Erro ao processar um link individual: {e_link}")
@@ -216,8 +246,18 @@ for modelo in modelos_para_processar:
                     if nome:
                         nomes_vistos.add(nome) 
                     
+                    if supabase and nome:
+                        try:
+                            response = supabase.table('veiculos').select('id', count='exact').eq('marca', 'citroen').eq('modelo', modelo).eq('versao', nome).execute()
+                            if response.count > 0:
+                                print(f"         - Aviso: Versão '{nome}' (Modelo: {modelo}) JÁ EXISTE no Supabase. Pulando.")
+                                continue 
+                        except Exception as e_supa:
+                            print(f"         - ⚠️ ERRO ao consultar Supabase para '{nome}': {e_supa}. Continuando a coleta...")
+
                     preco = driver.execute_script("return arguments[0].querySelector('span.font-h2, p.font-h2, div.font-h2, span.font-h3, p.font-h3, div.font-h3, h1 b')?.textContent.trim()", slide)
                     imagem_url = driver.execute_script("return arguments[0].querySelector('img.next-gen-media, div.chameleon-image img')?.getAttribute('src')", slide)
+                    
                     manual_url = None
                     try:
                         pdf_link_el = slide.find_element(By.XPATH, ".//a[contains(@href, '.pdf') and (contains(translate(., 'FICHA', 'ficha'), 'ficha'))]")
@@ -279,6 +319,17 @@ for modelo in modelos_para_processar:
                     except Exception as e_spec:
                         print(f"         - Erro ao processar itens de especificação (Motor, Rodas, etc.) para '{nome}': {e_spec}")
 
+                    if not manual_url and nome:
+                        try:
+                            nome_normalizado = nome.lower().strip().replace('!', '')
+                            key = (modelo, nome_normalizado)
+                            fallback_url = MANUAL_FALLBACK_MAP.get(key)
+                            if fallback_url:
+                                manual_url = fallback_url
+                                print(f"         - Info: Manual não encontrado no site. Usando URL de fallback para '{nome}'.")
+                        except Exception as e_map:
+                             print(f"         - Erro ao tentar aplicar fallback de manual: {e_map}")
+
 
                     if nome: 
                         print(f"         - Versão: {nome} (Preço: {preco or 'N/A'})")
@@ -327,6 +378,15 @@ for modelo in modelos_para_processar:
                         preco = None; imagem_url = driver.execute_script("return arguments[0].querySelector('div.hub-card-media img')?.getAttribute('src')", card)
                         manual_url = None
                         
+                        if supabase and nome:
+                            try:
+                                response = supabase.table('veiculos').select('id', count='exact').eq('marca', 'citroen').eq('modelo', modelo).eq('versao', nome).execute()
+                                if response.count > 0:
+                                    print(f"         - Aviso: Versão '{nome}' (Modelo: {modelo}) JÁ EXISTE no Supabase. Pulando.")
+                                    continue 
+                            except Exception as e_supa:
+                                print(f"         - ⚠️ ERRO ao consultar Supabase para '{nome}': {e_supa}. Continuando a coleta...")
+                        
                         try:
                             pdf_link_el = card.find_element(By.XPATH, ".//a[.//span[contains(translate(., 'FICHA', 'ficha'), 'ficha')] or (self::a and contains(translate(., 'FICHA', 'ficha'), 'ficha'))]")
                             pdf_href = pdf_link_el.get_attribute('href')
@@ -366,6 +426,17 @@ for modelo in modelos_para_processar:
                             print(f"                - Aviso: Link 'Ficha técnica' não encontrado no card para '{nome}'.")
                         except Exception as e_pdf_card: 
                             print(f"                - Erro ao procurar PDF no card: {e_pdf_card}")
+                        
+                        if not manual_url and nome:
+                            try:
+                                nome_normalizado = nome.lower().strip().replace('!', '')
+                                key = (modelo, nome_normalizado)
+                                fallback_url = MANUAL_FALLBACK_MAP.get(key)
+                                if fallback_url:
+                                    manual_url = fallback_url
+                                    print(f"         - Info: Manual não encontrado no site. Usando URL de fallback para '{nome}'.")
+                            except Exception as e_map:
+                                print(f"         - Erro ao tentar aplicar fallback de manual: {e_map}")
 
                         if nome: 
                             lista_versoes.append({
@@ -584,6 +655,18 @@ for modelo in modelos_para_processar:
                             print(f"         - Mantendo PDF do Card '{versao_name}' (Comparativo não tinha PDF).")
                             spec_dict.pop('manual_url', None)
                         
+                        # (Lógica de fallback de manual PÓS-merge)
+                        if not versao_dict.get('manual_url') and not spec_dict.get('manual_url'):
+                            try:
+                                nome_normalizado = versao_name.lower().strip().replace('!', '')
+                                key = (modelo, nome_normalizado)
+                                fallback_url = MANUAL_FALLBACK_MAP.get(key)
+                                if fallback_url:
+                                    spec_dict['manual_url'] = fallback_url
+                                    print(f"         - Info: Manual não encontrado no site. Usando URL de fallback para '{versao_name}'.")
+                            except Exception as e_map:
+                                print(f"         - Erro ao tentar aplicar fallback de manual no merge: {e_map}")
+
                         versao_dict.update(spec_dict) # Merge
                         versao_dict.pop("versao_comparativo", None)
                         found_match = True; break
@@ -601,13 +684,58 @@ for modelo in modelos_para_processar:
 # === 5️⃣ FECHAR O NAVEGADOR ===
 driver.quit()
 
-# === 6️⃣ MOSTRAR RESULTADO FINAL ===
+
+# --- INÍCIO DA ALTERAÇÃO (PASSO 5 E 6) ---
+
+# === 5️⃣ FORMATAR E ORDENAR A SAÍDA ===
+print("\n--- INICIANDO FORMATAÇÃO E ORDENAÇÃO (PASSO 5) ---")
+final_version_list = []
+
+# Define a ordem exata das chaves conforme solicitado
+key_order = [
+    "marca", "modelo", "tipo_veiculo", "ano", "versao", "preco", "imagem_url", 
+    "manual_url", "motorizacao", "motor", "turbo", "combustivel", "pneus", 
+    "pneus_diametro", "ar_condicionado", "outras_caracteristicas"
+]
+
+# Itera sobre o dicionário 'result' que foi construído
+for modelo_nome, modelo_data in result.items():
+    
+    for versao_dict in modelo_data.get("versoes", []):
+        
+        # Cria o novo dicionário
+        ordered_dict = {}
+        
+        # 1. Adiciona as chaves fixas/novas com base no seu exemplo
+        ordered_dict["marca"] = versao_dict.get("marca", "citroen")
+        ordered_dict["modelo"] = versao_dict.get("modelo", modelo_nome)
+        ordered_dict["tipo_veiculo"] = "TEXT"  # <-- Valor literal "TEXT"
+        ordered_dict["ano"] = "INTEGER"   # <-- Valor literal "INTEGER"
+        
+        # 2. Adiciona as chaves principais na ordem certa
+        for key in key_order:
+            if key not in ordered_dict and key in versao_dict:
+                ordered_dict[key] = versao_dict.get(key)
+        
+        # 3. Adiciona quaisquer chaves extras (ex: carga_util) no final
+        for key, value in versao_dict.items():
+            if key not in ordered_dict:
+                ordered_dict[key] = value
+                
+        final_version_list.append(ordered_dict)
+
+print(f"✔️ Formatação concluída. Total de {len(final_version_list)} versões processadas.")
+
+
+# === 6️⃣ SALVAR RESULTADO FINAL ===
 print("\n\n--- RESULTADO FINAL COMPLETO ---")
 output_filename = "citroen_data.json"
 try:
+    # Salva a NOVA lista plana no arquivo
     with open(output_filename, 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+        json.dump(final_version_list, f, indent=2, ensure_ascii=False)
     print(f"✔️ Dados salvos com sucesso em {output_filename}")
 except Exception as e:
     print(f"❌ Erro ao salvar o arquivo JSON: {e}")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(final_version_list, indent=2, ensure_ascii=False))
+# --- FIM DA ALTERAÇÃO ---
